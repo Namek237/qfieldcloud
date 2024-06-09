@@ -1,0 +1,34 @@
+version: '3.9'
+
+services:
+
+  app:
+    build:
+      context: ./docker-app
+      target: webserver_test
+    environment:
+      # we must use the same db for test and runserver
+      POSTGRES_DB: test_${POSTGRES_DB}
+      POSTGRES_DB_TEST: test_${POSTGRES_DB}
+
+  worker_wrapper:
+    environment:
+      # we must use the same db for test and runserver
+      POSTGRES_DB: test_${POSTGRES_DB}
+      POSTGRES_DB_TEST: test_${POSTGRES_DB}
+    scale: ${QFIELDCLOUD_WORKER_REPLICAS}
+
+  db:
+    environment:
+      POSTGRES_DB: test_${POSTGRES_DB}
+
+networks:
+  default:
+    # Use a custom driver
+    name: ${QFIELDCLOUD_DEFAULT_NETWORK}
+
+volumes:
+  # We use a different volume, just so that the test_ database
+  # gets created in the entrypoint.
+  postgres_data:
+    name: qfieldcloud_postgres_data_test

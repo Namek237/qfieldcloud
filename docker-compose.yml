@@ -1,0 +1,154 @@
+version: "3.9"
+
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "100m"
+    max-file: "10"
+    tag: "{{.ImageName}}|{{.Name}}|{{.ImageFullID}}|{{.FullID}}"
+
+services:
+  app: &default-django
+    build:
+      context: ./docker-app
+      target: webserver_runtime
+      network: host
+    restart: unless-stopped
+    command: >
+      gunicorn
+        qfieldcloud.wsgi:application
+        --bind 0.0.0.0:8000
+        --timeout ${GUNICORN_TIMEOUT_S}
+        --max-requests ${GUNICORN_MAX_REQUESTS}
+        --workers ${GUNICORN_WORKERS}
+        --threads ${GUNICORN_THREADS}
+    volumes:
+      - static_volume:/usr/src/app/staticfiles
+      - media_volume:/usr/src/app/mediafiles/
+    environment:
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS}
+      DJANGO_SETTINGS_MODULE: ${DJANGO_SETTINGS_MODULE}
+      SECRET_KEY: ${SECRET_KEY}
+      DEBUG: ${DEBUG}
+      ENVIRONMENT: ${ENVIRONMENT}
+      SENTRY_DSN: ${SENTRY_DSN}
+      SENTRY_RELEASE: ${SENTRY_RELEASE}
+      # Sentry environment should not be configured like this, but I never made it work with `sentry_sdk.init(environment=ENVIRONMENT)`.
+      SENTRY_ENVIRONMENT: ${ENVIRONMENT}
+      SENTRY_SAMPLE_RATE: ${SENTRY_SAMPLE_RATE}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_DB_TEST: test_${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_HOST: ${POSTGRES_HOST}
+      POSTGRES_PORT: ${POSTGRES_PORT}
+      POSTGRES_SSLMODE: ${POSTGRES_SSLMODE}
+      STORAGE_ACCESS_KEY_ID: ${STORAGE_ACCESS_KEY_ID}
+      STORAGE_SECRET_ACCESS_KEY: ${STORAGE_SECRET_ACCESS_KEY}
+      STORAGE_BUCKET_NAME: ${STORAGE_BUCKET_NAME}
+      STORAGE_REGION_NAME: ${STORAGE_REGION_NAME}
+      STORAGE_ENDPOINT_URL: ${STORAGE_ENDPOINT_URL}
+      QFIELDCLOUD_DEFAULT_NETWORK: ${QFIELDCLOUD_DEFAULT_NETWORK}
+      GEODB_HOST: ${GEODB_HOST}
+      GEODB_PORT: ${GEODB_PORT}
+      GEODB_USER: ${GEODB_USER}
+      GEODB_PASSWORD: ${GEODB_PASSWORD}
+      GEODB_DB: ${GEODB_DB}
+      ACCOUNT_EMAIL_VERIFICATION: ${ACCOUNT_EMAIL_VERIFICATION}
+      EMAIL_HOST: ${EMAIL_HOST}
+      EMAIL_USE_TLS: ${EMAIL_USE_TLS}
+      EMAIL_USE_SSL: ${EMAIL_USE_SSL}
+      EMAIL_PORT: ${EMAIL_PORT}
+      EMAIL_HOST_USER: ${EMAIL_HOST_USER}
+      EMAIL_HOST_PASSWORD: ${EMAIL_HOST_PASSWORD}
+      DEFAULT_FROM_EMAIL: ${DEFAULT_FROM_EMAIL}
+      # Settings below are specific to worker_wrapper
+      # TODO : move this to the worker_wrapper service and keep things DRY (yaml syntax expert needed)
+      TMP_DIRECTORY: ${TMP_DIRECTORY}
+      QFIELDCLOUD_HOST: ${QFIELDCLOUD_HOST}
+      QFIELDCLOUD_ADMIN_URI: ${QFIELDCLOUD_ADMIN_URI}
+      QFIELDCLOUD_WORKER_QFIELDCLOUD_URL: ${QFIELDCLOUD_WORKER_QFIELDCLOUD_URL}
+      QFIELDCLOUD_SUBSCRIPTION_MODEL: ${QFIELDCLOUD_SUBSCRIPTION_MODEL}
+      QFIELDCLOUD_AUTH_TOKEN_EXPIRATION_HOURS: ${QFIELDCLOUD_AUTH_TOKEN_EXPIRATION_HOURS}
+      QFIELDCLOUD_DEFAULT_TIME_ZONE: ${QFIELDCLOUD_DEFAULT_TIME_ZONE}
+      QFIELDCLOUD_QGIS_IMAGE_NAME: ${QFIELDCLOUD_QGIS_IMAGE_NAME:-${COMPOSE_PROJECT_NAME}-qgis}
+      QFIELDCLOUD_TRANSFORMATION_GRIDS_VOLUME_NAME: ${COMPOSE_PROJECT_NAME}_transformation_grids
+      WEB_HTTP_PORT: ${WEB_HTTP_PORT}
+      WEB_HTTPS_PORT: ${WEB_HTTPS_PORT}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "1000m"
+        max-file: "10"
+        tag: "{{.ImageName}}|{{.Name}}|{{.ImageFullID}}|{{.FullID}}"
+    labels:
+      ofelia.enabled: "true"
+      ofelia.job-exec.runcrons.no-overlap: "true"
+      ofelia.job-exec.runcrons.schedule: "@every 1m"
+      ofelia.job-exec.runcrons.command: python manage.py runcrons
+      
+  web:
+    build: .
+    restart: always
+    ports:
+      - 443:443
+    depends_on:
+      - app
+
+  qgis:
+    build:
+      context: ./docker-qgis
+      network: host
+      args:
+        DEBUG_BUILD: ${DEBUG}
+    tty: true
+    command: bash -c "echo QGIS built"
+    logging: *default-logging
+
+  worker_wrapper:
+    <<: *default-django
+    build:
+      context: ./docker-app
+      network: host
+      target: worker_wrapper_runtime
+    command: python manage.py dequeue
+    user: root # TODO change me to least privileged docker-capable user on the host (/!\ docker users!=hosts users, use UID rather than username)
+    volumes:
+      # TODO : how can we reuse static/media volumes from default-django to keep things DRY (yaml syntax expert needed)
+      - static_volume:/usr/src/app/staticfiles
+      - media_volume:/usr/src/app/mediafiles/
+      - ./transformation_grids:/transformation_grids
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${LOG_DIRECTORY}:/log
+      - ${TMP_DIRECTORY}:/tmp
+    logging: *default-logging
+    scale: ${QFIELDCLOUD_WORKER_REPLICAS}
+    stop_grace_period: 15m
+
+  ofelia:
+    image: mcuadros/ofelia:v0.3.4
+    restart: unless-stopped
+    depends_on:
+      - app
+    command: daemon --docker
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  mirror_transformation_grids:
+    image: k3rnelpan1c/alpine-wget:latest
+    #command: |
+    #  wget --mirror https://cdn.proj.org/ -P /transformation_grids --no-host-directories
+    #  chmod a+r /transformation_grids/*
+    volumes:
+      - ./transformation_grids:/transformation_grids
+
+  memcached:
+    image: memcached:1
+    expose:
+      - "11211:11211"
+
+volumes:
+  static_volume:
+  media_volume:
+  #transformation_grids:
+  certbot_www:

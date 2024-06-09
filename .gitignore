@@ -1,0 +1,15 @@
+__pycache__/
+*.log
+*.orig
+.htmlcov/
+.coverage
+/conf/supervisord.conf
+.vscode
+.env
+docker-compose.override.yml
+client/projects
+docker-nginx/certs/*
+conf/certbot/*
+Pipfile*
+**/site-packages
+docker-qgis/libqfieldsync
